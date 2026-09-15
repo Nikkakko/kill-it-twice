@@ -1,0 +1,9 @@
+{
+  "name": "@kill-it-twice/database",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": { "build": "prisma generate && tsc -p tsconfig.json", "lint": "prisma generate && tsc -p tsconfig.json --noEmit", "test": "prisma generate && tsc -p tsconfig.json --noEmit" },
+  "dependencies": { "@prisma/client": "^6.16.2", "pg": "^8.13.1" },
+  "devDependencies": { "@types/pg": "^8.11.10", "prisma": "^6.16.2" }
+}

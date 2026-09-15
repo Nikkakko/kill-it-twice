@@ -1,0 +1,104 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: replication
+      POSTGRES_USER: replication
+      POSTGRES_PASSWORD: replication
+      DATABASE_URL: postgresql://replication:replication@postgres:5432/replication
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U replication -d replication"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: replication
+      RABBITMQ_DEFAULT_PASS: replication
+    ports: ["5672:5672", "15672:15672"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports: ["9200:9200"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - elastic-data:/usr/share/elasticsearch/data
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: replication
+      POSTGRES_USER: replication
+      POSTGRES_PASSWORD: replication
+      DATABASE_URL: postgresql://replication:replication@postgres:5432/replication
+      API_PORT: 3000
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports: ["3000:3000"]
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: replication
+      POSTGRES_USER: replication
+      POSTGRES_PASSWORD: replication
+      DATABASE_URL: postgresql://replication:replication@postgres:5432/replication
+      RABBITMQ_URL: amqp://replication:replication@rabbitmq:5672
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    depends_on:
+      api: { condition: service_started }
+      rabbitmq: { condition: service_healthy }
+      elasticsearch: { condition: service_healthy }
+
+  consumer:
+    build:
+      context: .
+      dockerfile: apps/consumer/Dockerfile
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: replication
+      POSTGRES_USER: replication
+      POSTGRES_PASSWORD: replication
+      RABBITMQ_URL: amqp://replication:replication@rabbitmq:5672
+    depends_on:
+      api: { condition: service_started }
+      rabbitmq: { condition: service_healthy }
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    depends_on:
+      api: { condition: service_started }
+    ports: ["4200:80"]
+
+volumes:
+  postgres-data:
+  elastic-data:

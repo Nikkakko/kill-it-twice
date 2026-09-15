@@ -1,0 +1,85 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model SourceRecord {
+  id        String   @id @db.Uuid
+  name      String
+  email     String
+  segment   String
+  valid     Boolean  @default(true)
+  version   BigInt   @default(1)
+  deleted   Boolean  @default(false)
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@map("source_records")
+}
+
+model OutboxEvent {
+  sequence  BigInt   @id @default(autoincrement())
+  eventId   String   @unique @db.Uuid @map("event_id")
+  recordId  String   @db.Uuid @map("record_id")
+  version   BigInt
+  operation String
+  payload   Json?
+  mode      String
+  target    String   @default("both")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("outbox_events")
+}
+
+model ReplicationCheckpoint {
+  sink           String   @id
+  lastSequence   BigInt   @default(0) @map("last_sequence")
+  processedTotal BigInt   @default(0) @map("processed_total")
+  updatedAt      DateTime @default(now()) @map("updated_at")
+
+  @@map("replication_checkpoints")
+}
+
+model DeadLetter {
+  id            BigInt    @id @default(autoincrement())
+  sink          String
+  sequence      BigInt
+  eventId       String    @db.Uuid @map("event_id")
+  recordId      String    @db.Uuid @map("record_id")
+  payload       Json?
+  errorCode     String    @map("error_code")
+  errorMessage  String    @map("error_message")
+  retryCount    Int       @default(0) @map("retry_count")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  replayedAt    DateTime? @map("replayed_at")
+
+  @@unique([sink, sequence])
+  @@map("dead_letters")
+}
+
+model PipelineControl {
+  key   String @id
+  value Json
+
+  @@map("pipeline_control")
+}
+
+model WorkerRuntime {
+  id              Boolean  @id @default(true)
+  processedTotal  BigInt   @default(0) @map("processed_total")
+  lastSequence    BigInt   @default(0) @map("last_sequence")
+  lastHeartbeat   DateTime @default(now()) @map("last_heartbeat")
+
+  @@map("worker_runtime")
+}
+
+model ConsumedEvent {
+  eventId    String   @id @db.Uuid @map("event_id")
+  sequence   BigInt
+  consumedAt DateTime @default(now()) @map("consumed_at")
+
+  @@map("consumed_events")
+}

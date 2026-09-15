@@ -1,0 +1,7 @@
+{
+  "name": "@kill-it-twice/consumer",
+  "private": true,
+  "scripts": { "build": "tsc -p tsconfig.json", "dev": "tsx watch src/main.ts", "lint": "tsc -p tsconfig.json --noEmit", "test": "tsc -p tsconfig.json --noEmit" },
+  "dependencies": { "@kill-it-twice/database": "workspace:*", "@nestjs/common": "^11.0.11", "@nestjs/core": "^11.0.11", "amqplib": "^0.10.5", "reflect-metadata": "^0.2.2" },
+  "devDependencies": { "tsx": "^4.19.2", "@types/amqplib": "^0.10.5", "@types/node": "^22.10.2" }
+}
