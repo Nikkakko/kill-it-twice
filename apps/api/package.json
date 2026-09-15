@@ -6,6 +6,7 @@
     "@nestjs/common": "^11.0.11",
     "@nestjs/core": "^11.0.11",
     "@nestjs/platform-express": "^11.0.11",
+    "@elastic/elasticsearch": "^8.19.2",
     "@kill-it-twice/contracts": "workspace:*",
     "@kill-it-twice/database": "workspace:*",
     "class-transformer": "^0.5.1",

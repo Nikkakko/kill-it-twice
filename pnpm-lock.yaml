@@ -17,6 +17,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@elastic/elasticsearch':
+        specifier: ^8.19.2
+        version: 8.19.2
       '@kill-it-twice/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

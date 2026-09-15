@@ -1,79 +1,305 @@
 import { CommonModule } from "@angular/common";
 import { HttpClient } from "@angular/common/http";
-import { Component, OnInit, inject } from "@angular/core";
+import { Component, DestroyRef, OnInit, inject, signal } from "@angular/core";
+import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
 import { FormsModule } from "@angular/forms";
-import { interval, startWith, switchMap } from "rxjs";
+import {
+  EMPTY,
+  Observable,
+  catchError,
+  finalize,
+  interval,
+  startWith,
+  switchMap,
+} from "rxjs";
+import { DlqPanelComponent } from "./components/dlq-panel.component";
+import { PipelineControlsComponent } from "./components/pipeline-controls.component";
+import { RecordsPanelComponent } from "./components/records-panel.component";
+import { SimulationPanelComponent } from "./components/simulation-panel.component";
+import { StatusStatsComponent } from "./components/status-stats.component";
+import {
+  ActionKey,
+  DeadLetter,
+  Notice,
+  PipelineAction,
+  PipelineStatus,
+  ReplicatedRecord,
+  SinkName,
+  SinkState,
+} from "./models";
 
 @Component({
   selector: "app-root",
   standalone: true,
-  imports: [CommonModule, FormsModule],
-  template: `
-    <main>
-      <header><div><span class="eyebrow">OPTIO PLATFORM</span><h1>Kill It Twice</h1><p>Replication operations console</p></div><span class="pill" [class.bad]="status?.health?.worker !== 'healthy'">● {{ status?.health?.worker || 'connecting' }}</span></header>
-      <section class="stats">
-        <article><label>Backfill source</label><strong>{{ status?.sourceCount | number }}</strong><small>{{ status?.outboxCount | number }} ordered events</small></article>
-        <article><label>Search checkpoint</label><strong>{{ status?.checkpoints?.search | number }}</strong><small>{{ status?.pending?.search | number }} pending</small></article>
-        <article><label>Event checkpoint</label><strong>{{ status?.checkpoints?.events | number }}</strong><small>{{ status?.pending?.events | number }} pending</small></article>
-        <article><label>Incremental lag</label><strong>{{ status?.incrementalLag | number }}</strong><small>{{ status?.throughputPerSecond | number }} events/s estimate</small></article>
-        <article class="danger"><label>DLQ</label><strong>{{ status?.dlqCount | number }}</strong><small>unreplayed records</small></article>
-      </section>
-      <section class="panel controls"><div><h2>Pipeline control</h2><p>Current state: <b>{{ status?.paused ? 'Paused' : 'Running' }}</b></p></div><div class="actions"><button (click)="control(status?.paused ? 'resume' : 'pause')">{{ status?.paused ? 'Resume' : 'Pause' }}</button><button class="secondary" (click)="seed()">Seed 20k</button><button class="secondary" (click)="replay()">Replay DLQ</button></div></section>
-      <section class="grid"><div class="panel"><div class="panel-title"><h2>Replicated records</h2><input [(ngModel)]="query" (keyup.enter)="loadRecords()" placeholder="Search name or email"></div><table><thead><tr><th>Name</th><th>Email</th><th>Segment</th><th>Version</th><th>Updated</th></tr></thead><tbody><tr *ngFor="let record of records"><td>{{ record.name }}</td><td>{{ record.email }}</td><td><span class="tag">{{ record.segment }}</span></td><td>{{ record.version }}</td><td>{{ record.updatedAt | date:'short' }}</td></tr></tbody></table></div><div class="panel"><div class="panel-title"><h2>Simulation</h2></div><p class="muted">Trigger controlled failures to exercise recovery.</p><div class="sim"><span>Elasticsearch</span><button (click)="sink('search','down')">Down</button><button class="secondary" (click)="sink('search','up')">Up</button></div><div class="sim"><span>RabbitMQ publisher</span><button (click)="sink('events','down')">Down</button><button class="secondary" (click)="sink('events','up')">Up</button></div><button class="wide" (click)="partial()">Inject 500 / 3 invalid</button><p class="result">{{ message }}</p></div></section>
-      <section class="panel"><div class="panel-title"><h2>Dead-letter queue</h2><button class="secondary" (click)="loadDlq()">Refresh</button></div><table><thead><tr><th>Sink</th><th>Sequence</th><th>Record</th><th>Error</th><th>Created</th></tr></thead><tbody><tr *ngFor="let item of dlq"><td>{{ item.sink }}</td><td>{{ item.sequence }}</td><td class="mono">{{ item.recordId | slice:0:8 }}</td><td>{{ item.errorCode }}</td><td>{{ item.createdAt | date:'short' }}</td></tr><tr *ngIf="!dlq.length"><td colspan="5" class="muted">No unreplayed failures.</td></tr></tbody></table></section>
-    </main>`,
+  imports: [
+    CommonModule,
+    FormsModule,
+    DlqPanelComponent,
+    PipelineControlsComponent,
+    RecordsPanelComponent,
+    SimulationPanelComponent,
+    StatusStatsComponent,
+  ],
+  template: ` <main>
+    <header>
+      <div>
+        <span class="eyebrow">OPTIO PLATFORM</span>
+        <h1>Kill It Twice</h1>
+        <p>Replication operations console</p>
+      </div>
+      <span
+        *ngIf="status(); else connecting"
+        class="pill"
+        [class.bad]="status()?.health?.worker !== 'healthy'"
+        >● {{ status()?.health?.worker }}</span
+      >
+      <ng-template #connecting
+        ><span class="pill pending-pill">● connecting</span></ng-template
+      >
+    </header>
+    <div
+      *ngIf="notice()"
+      class="toast"
+      [class.toast-error]="notice()?.kind === 'error'"
+      [class.toast-info]="notice()?.kind === 'info'"
+      role="status"
+      aria-live="polite"
+    >
+      <span>{{
+        notice()?.kind === "error" ? "!" : notice()?.kind === "info" ? "…" : "✓"
+      }}</span
+      >{{ notice()?.text }}
+    </div>
+    <app-status-stats [status]="status()" [loading]="statusLoading()" />
+    <app-pipeline-controls
+      [status]="status()"
+      [batchSize]="batchSize()"
+      [busy]="actionBusy()"
+      (control)="control($event)"
+      (seed)="seed()"
+      (replay)="replay()"
+      (batchSizeChange)="batchSize.set($event)"
+      (configChange)="saveConfig()"
+    />
+    <section class="grid">
+      <app-records-panel
+        [records]="records()"
+        [query]="query()"
+        [loading]="recordsLoading()"
+        [error]="recordsError()"
+        (queryChange)="query.set($event)"
+        (search)="loadRecords()"
+      />
+      <app-simulation-panel
+        [busy]="actionBusy()"
+        (sink)="sink($event.name, $event.state)"
+        (partial)="partial()"
+      />
+    </section>
+    <app-dlq-panel
+      [items]="dlq()"
+      [loading]="dlqLoading()"
+      [error]="dlqError()"
+      (refresh)="loadDlq()"
+    />
+  </main>`,
   styleUrls: ["./styles.css"],
 })
 export class AppComponent implements OnInit {
   private readonly http = inject(HttpClient);
-  status: any;
-  records: any[] = [];
-  dlq: any[] = [];
-  query = "";
-  message = "";
+  private readonly destroyRef = inject(DestroyRef);
+
+  readonly status = signal<PipelineStatus | null>(null);
+  readonly records = signal<ReplicatedRecord[]>([]);
+  readonly dlq = signal<DeadLetter[]>([]);
+  readonly query = signal("");
+  readonly batchSize = signal(100);
+  readonly notice = signal<Notice | null>(null);
+  readonly actionBusy = signal<ActionKey | null>(null);
+  readonly statusLoading = signal(true);
+  readonly recordsLoading = signal(true);
+  readonly dlqLoading = signal(true);
+  readonly recordsError = signal("");
+  readonly dlqError = signal("");
+
   ngOnInit() {
     interval(2000)
       .pipe(
         startWith(0),
-        switchMap(() => this.http.get("/api/status")),
+        switchMap(() =>
+          this.http.get<PipelineStatus>("/api/status").pipe(
+            catchError(() => {
+              this.statusLoading.set(false);
+              this.setNotice("error", "Unable to reach the API. Retrying…");
+              return EMPTY;
+            }),
+          ),
+        ),
+        takeUntilDestroyed(this.destroyRef),
       )
-      .subscribe(v => (this.status = v));
+      .subscribe(value => {
+        this.status.set(value);
+        this.statusLoading.set(false);
+      });
+    this.http
+      .get<{ batchSize: number }>("/api/config")
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: value => this.batchSize.set(value.batchSize),
+        error: () => undefined,
+      });
     this.loadRecords();
     this.loadDlq();
+    interval(5000)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => {
+        this.refreshRecords(false);
+        this.refreshDlq(false);
+      });
   }
-  control(action: string) {
-    this.http
-      .post(`/api/pipeline/${action}`, {})
-      .subscribe(() => (this.message = `Pipeline ${action} requested`));
+
+  control(action: PipelineAction) {
+    this.runAction(
+      "control",
+      this.http.post(`/api/pipeline/${action}`, {}),
+      `Pipeline ${action} requested`,
+    );
   }
   seed() {
-    this.http
-      .post("/api/simulation/seed", { count: 20000, reset: true })
-      .subscribe((v: any) => (this.message = `Seeded ${v.seeded} records`));
+    this.runAction(
+      "seed",
+      this.http.post("/api/simulation/seed", { count: 20000, reset: true }),
+      "Seeded 20,000 records",
+      () => {
+        this.loadRecords();
+        this.loadDlq();
+      },
+    );
   }
   replay() {
-    this.http.post("/api/dlq/replay", {}).subscribe((v: any) => {
-      this.message = `Replayed ${v.replayed} records`;
-      this.loadDlq();
-    });
+    this.runAction(
+      "replay",
+      this.http.post("/api/dlq/replay", {}),
+      "DLQ replay queued",
+      () => this.loadDlq(),
+    );
   }
-  sink(name: string, state: string) {
-    this.http
-      .post(`/api/simulation/sink/${name}/${state}`, {})
-      .subscribe(() => (this.message = `${name} marked ${state}`));
+  sink(name: SinkName, state: SinkState) {
+    this.runAction(
+      `sink:${name}:${state}`,
+      this.http.post(`/api/simulation/sink/${name}/${state}`, {}),
+      `${name} marked ${state}`,
+    );
   }
   partial() {
-    this.http.post("/api/simulation/partial", { count: 500 }).subscribe(() => {
-      this.message = "Injected 500 events, including 3 invalid";
-      this.loadDlq();
-    });
+    this.runAction(
+      "partial",
+      this.http.post("/api/simulation/partial", { count: 500 }),
+      "Injected 500 events, including 3 invalid",
+      () => this.loadDlq(),
+    );
   }
+
+  saveConfig() {
+    const value = Math.min(1000, Math.max(1, Number(this.batchSize()) || 100));
+    this.batchSize.set(value);
+    this.runAction(
+      "config",
+      this.http.post<{ batchSize: number }>("/api/config", {
+        batchSize: value,
+      }),
+      `Batch size set to ${value}`,
+      result => this.batchSize.set(result.batchSize),
+    );
+  }
+
   loadRecords() {
-    this.http
-      .get<any[]>(`/api/records?q=${encodeURIComponent(this.query)}`)
-      .subscribe(v => (this.records = v));
+    this.refreshRecords(true);
   }
   loadDlq() {
-    this.http.get<any[]>("/api/dlq").subscribe(v => (this.dlq = v));
+    this.refreshDlq(true);
+  }
+
+  private refreshRecords(showLoader: boolean) {
+    if (showLoader) this.recordsLoading.set(true);
+    this.recordsError.set("");
+    this.http
+      .get<ReplicatedRecord[]>(
+        `/api/replicated?q=${encodeURIComponent(this.query())}`,
+      )
+      .pipe(
+        finalize(() => this.recordsLoading.set(false)),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe({
+        next: value => this.records.set(value),
+        error: () => {
+          this.recordsError.set("Could not load replicated records");
+          this.setNotice("error", "Could not load replicated records");
+        },
+      });
+  }
+
+  private refreshDlq(showLoader: boolean) {
+    if (showLoader) this.dlqLoading.set(true);
+    this.dlqError.set("");
+    this.http
+      .get<DeadLetter[]>("/api/dlq")
+      .pipe(
+        finalize(() => this.dlqLoading.set(false)),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe({
+        next: value => this.dlq.set(value),
+        error: () => {
+          this.dlqError.set("Could not load DLQ");
+          this.setNotice("error", "Could not load the dead-letter queue");
+        },
+      });
+  }
+
+  private runAction<T>(
+    key: ActionKey,
+    request: Observable<T>,
+    success: string,
+    after?: (value: T) => void,
+  ) {
+    if (this.actionBusy()) return;
+    this.actionBusy.set(key);
+    this.setNotice("info", "Working…");
+    request
+      .pipe(
+        finalize(() => this.actionBusy.set(null)),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe({
+        next: value => {
+          after?.(value);
+          this.setNotice("success", success);
+          this.refreshStatus();
+        },
+        error: () =>
+          this.setNotice(
+            "error",
+            "Action failed. Check the service status and try again.",
+          ),
+      });
+  }
+
+  private refreshStatus() {
+    this.http
+      .get<PipelineStatus>("/api/status")
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: value => this.status.set(value),
+        error: () => undefined,
+      });
+  }
+  private setNotice(kind: Notice["kind"], text: string) {
+    this.notice.set({ kind, text });
+    if (kind !== "error")
+      setTimeout(() => {
+        if (this.notice()?.text === text) this.notice.set(null);
+      }, 3500);
   }
 }

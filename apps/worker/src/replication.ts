@@ -43,7 +43,21 @@ export class ReplicationService {
 
   private async ensureIndex() {
     try {
-      await this.elastic.indices.create({ index: 'replicated-records' });
+      await this.elastic.indices.create({
+        index: 'replicated-records',
+        mappings: {
+          properties: {
+            id: { type: 'keyword' },
+            name: { type: 'text' },
+            email: { type: 'text' },
+            segment: { type: 'keyword' },
+            valid: { type: 'boolean' },
+            source_version: { type: 'long' },
+            replicated_sequence: { type: 'long' },
+            replicated_at: { type: 'date' },
+          },
+        },
+      });
     } catch (error: any) {
       if (error?.meta?.statusCode !== 400) this.logger.warn(`Elasticsearch index setup deferred: ${error.message}`);
     }
@@ -54,7 +68,7 @@ export class ReplicationService {
       try {
         const paused = await this.isControl('paused');
         if (paused) { await this.delay(500); continue; }
-        const rows = await this.nextBatch(sink, 100);
+        const rows = await this.nextBatch(sink, await this.batchSize());
         if (!rows.length) { await this.delay(250); continue; }
         for (const event of rows) {
           try {
@@ -87,6 +101,11 @@ export class ReplicationService {
     return result.rows;
   }
 
+  private async batchSize(): Promise<number> {
+    const result = await this.db.query<{ value: string }>("SELECT value::text::integer value FROM pipeline_control WHERE key='batch_size'");
+    return Math.min(1000, Math.max(1, Number(result.rows[0]?.value ?? 100)));
+  }
+
   private async processEvent(sink: SinkName, event: OutboxRow) {
     if (await this.isControl(`${sink}_outage`)) throw new Error(`${sink} outage simulation is active`);
     if (event.payload && (event.payload as any).valid === false) {
@@ -101,7 +120,7 @@ export class ReplicationService {
         } catch (error: any) {
           if (error?.meta?.statusCode !== 404) throw error;
         }
-      } else await this.elastic.index({ index: 'replicated-records', id: event.recordId, document: { ...(event.payload ?? {}), source_version: event.version, replicated_sequence: event.sequence } });
+      } else await this.elastic.index({ index: 'replicated-records', id: event.recordId, document: { ...(event.payload ?? {}), source_version: event.version, replicated_sequence: event.sequence, replicated_at: new Date().toISOString() } });
     } else {
       if (!this.rabbit) throw new Error('RabbitMQ channel unavailable');
       const message = Buffer.from(JSON.stringify(event));

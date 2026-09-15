@@ -53,9 +53,11 @@ services:
       POSTGRES_USER: replication
       POSTGRES_PASSWORD: replication
       DATABASE_URL: postgresql://replication:replication@postgres:5432/replication
+      ELASTICSEARCH_URL: http://elasticsearch:9200
       API_PORT: 3000
     depends_on:
       postgres: { condition: service_healthy }
+      elasticsearch: { condition: service_healthy }
     ports: ["3000:3000"]
 
   worker:

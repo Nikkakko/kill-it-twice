@@ -36,7 +36,9 @@ Transport is at-least-once. Final state is effectively-once: retries can repeat 
 
 ## Capacity notes
 
-The default seed is 20,000 records, intentionally large enough to exercise bounded batches without making local verification impractical. The worker uses 100-record reads and never loads the dataset into memory. Measure actual throughput with `make verify`; the likely bottleneck is Elasticsearch indexing, followed by local PostgreSQL I/O. To double throughput, use Elasticsearch bulk requests, increase worker concurrency per sink, and partition the outbox by sequence range while retaining idempotent version checks.
+The default seed is 20,000 records, intentionally large enough to exercise bounded batches without making local verification impractical. The worker uses configurable 1–1,000-record reads and never loads the dataset into memory. Measure actual throughput with `make capacity`; the likely bottleneck is Elasticsearch indexing, followed by local PostgreSQL I/O. To double throughput, use Elasticsearch bulk requests, increase worker concurrency per sink, and partition the outbox by sequence range while retaining idempotent version checks.
+
+Measured locally with `make capacity` on the Docker Compose stack: 20,000 records, batch size 100, 68.13 seconds end-to-end, 293.5 records/second, and 20,000 Elasticsearch documents. This is a reproducible baseline rather than a production capacity claim; host CPU, Docker resources, and storage will change the result.
 
 ## ADRs
 
@@ -72,4 +74,14 @@ The initial reset truncated PostgreSQL tables but left Elasticsearch documents a
 
 ## Gate status
 
-Run `make verify` for the current evidence. The verifier intentionally reports FAIL rather than hiding an incomplete or unavailable dependency.
+The current live Docker run passes all required gates:
+
+| Gate | Result | Evidence |
+| --- | --- | --- |
+| G1 resume after kill | PASS | Worker killed mid-backfill; search checkpoint recovered to 5,000 |
+| G2 no duplicates | PASS | Source 5,000; Elasticsearch 5,000; independent consumer unique count 5,000 |
+| G3 sink outage | PASS | Elasticsearch container stopped with pending work, then restarted and drained |
+| G4 partial batch failure | PASS | 497 valid records written; 3 invalid records isolated in the DLQ |
+| G5 observability | PASS | Status exposes health, checkpoints, lag, throughput, and DLQ count |
+
+Run `make verify` to repeat the failure-oriented integration test, or `make capacity` to repeat the 20,000-record measurement. The verifier intentionally reports FAIL rather than hiding an incomplete or unavailable dependency.

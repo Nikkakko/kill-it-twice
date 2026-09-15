@@ -1,4 +1,4 @@
-.PHONY: install dev up down seed verify build
+.PHONY: install dev up down seed verify capacity build
 
 install:
 	pnpm install
@@ -20,3 +20,6 @@ seed:
 
 verify:
 	./scripts/verify.sh
+
+capacity:
+	./scripts/capacity.sh

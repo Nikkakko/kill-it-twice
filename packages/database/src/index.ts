@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS pipeline_control (
   value JSONB NOT NULL
 );
 INSERT INTO pipeline_control(key, value) VALUES
-  ('paused', 'false'), ('search_outage', 'false'), ('events_outage', 'false')
+  ('paused', 'false'), ('search_outage', 'false'), ('events_outage', 'false'), ('batch_size', '100')
 ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS worker_runtime (
   id BOOLEAN PRIMARY KEY DEFAULT TRUE,

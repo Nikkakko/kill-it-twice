@@ -1,9 +1,12 @@
 import { Body, Controller, Get, Param, Post, Query } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { Database } from "@kill-it-twice/database";
+import { Client as ElasticsearchClient } from "@elastic/elasticsearch";
 
 @Controller()
 export class ApiController {
+  private readonly elastic = new ElasticsearchClient({ node: process.env.ELASTICSEARCH_URL ?? "http://localhost:9200" });
+
   constructor(private readonly db: Database) {}
 
   @Get("health")
@@ -66,9 +69,35 @@ export class ApiController {
             ? "healthy"
             : "stale",
         rabbitmq: "managed-by-worker",
-        elasticsearch: "managed-by-worker",
+        elasticsearch: await this.elasticsearchHealth(),
       },
     };
+  }
+
+  @Get("replicated")
+  async replicated(@Query("q") q = "", @Query("limit") limit = "50") {
+    const size = Math.min(200, Math.max(1, Number(limit) || 50));
+    try {
+      const result = await this.elastic.search({
+        index: "replicated-records",
+        size,
+        query: q ? { multi_match: { query: q, fields: ["name", "email", "segment"] } } : { match_all: {} },
+        sort: [{ replicated_sequence: "desc" }],
+      });
+      return result.hits.hits.map(hit => {
+        const source = hit._source as Record<string, unknown> | undefined;
+        return source
+          ? {
+              ...source,
+              source_version: Number(source.source_version),
+              replicated_sequence: Number(source.replicated_sequence),
+            }
+          : source;
+      });
+    } catch (error: any) {
+      if (error?.meta?.statusCode === 404) return [];
+      throw error;
+    }
   }
 
   @Get("records")
@@ -214,10 +243,48 @@ export class ApiController {
 
   @Post("dlq/replay")
   async replay() {
-    const result = await this.db.query<{ id: number }>(
-      "UPDATE dead_letters SET replayed_at=now() WHERE replayed_at IS NULL RETURNING id",
+    const replayed = await this.db.transaction(async client => {
+      const failures = await client.query<{
+        id: number;
+        sink: "search" | "events";
+        sequence: string;
+        payload: Record<string, unknown> | null;
+        record_id: string;
+      }>("SELECT id, sink, sequence::text, payload, record_id FROM dead_letters WHERE replayed_at IS NULL ORDER BY id");
+      let count = 0;
+      for (const failure of failures.rows) {
+        const original = await client.query<{ version: string; operation: string }>(
+          "SELECT version::text, operation FROM outbox_events WHERE sequence=$1",
+          [failure.sequence],
+        );
+        const event = original.rows[0];
+        if (!event) continue;
+        await client.query(
+          "INSERT INTO outbox_events(event_id,record_id,version,operation,payload,mode,target) VALUES ($1,$2,$3,$4,$5,'incremental',$6)",
+          [randomUUID(), failure.record_id, Number(event.version), event.operation, failure.payload, failure.sink],
+        );
+        await client.query("UPDATE dead_letters SET replayed_at=now() WHERE id=$1", [failure.id]);
+        count++;
+      }
+      return count;
+    });
+    return { replayed };
+  }
+
+  @Get("config")
+  async config() {
+    const result = await this.db.query<{ value: number }>("SELECT value::text::integer value FROM pipeline_control WHERE key='batch_size'");
+    return { batchSize: Number(result.rows[0]?.value ?? 100) };
+  }
+
+  @Post("config")
+  async updateConfig(@Body() body: { batchSize?: number }) {
+    const batchSize = Math.min(1000, Math.max(1, Number(body?.batchSize ?? 100)));
+    await this.db.query(
+      "INSERT INTO pipeline_control(key,value) VALUES ('batch_size',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",
+      [batchSize],
     );
-    return { replayed: result.rowCount ?? 0 };
+    return { batchSize };
   }
 
   private async consumerCount(): Promise<number> {
@@ -225,5 +292,14 @@ export class ApiController {
       `SELECT count(*)::text count FROM consumed_events WHERE consumed_at > now() - interval '5 minutes'`,
     );
     return Number(result.rows[0]?.count ?? 0) > 0 ? 1 : 0;
+  }
+
+  private async elasticsearchHealth(): Promise<string> {
+    try {
+      await this.elastic.cluster.health();
+      return "healthy";
+    } catch {
+      return "unhealthy";
+    }
   }
 }

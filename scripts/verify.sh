@@ -44,11 +44,13 @@ wait_until_mid_backfill() {
 say "Kill It Twice integration verification"
 if ! wait_for_api; then fail "Prerequisites" "API did not become ready"; exit 1; fi
 curl -fsS -X POST "$API_URL/api/pipeline/pause" >/dev/null
+docker compose stop "$WORKER_SERVICE" >/dev/null
 curl -sS -o /dev/null -X DELETE http://localhost:9200/replicated-records || true
 docker compose exec -T rabbitmq rabbitmqctl purge_queue replication.consumer >/dev/null 2>&1 || true
 curl -fsS -X POST "$API_URL/api/simulation/seed" -H 'content-type: application/json' -d '{"count":5000,"reset":true}' >/dev/null
 
 expected=$(json_number "$(status_json)" '.sourceCount')
+docker compose up -d "$WORKER_SERVICE" >/dev/null
 curl -fsS -X POST "$API_URL/api/pipeline/resume" >/dev/null
 if ! wait_until_mid_backfill "$expected"; then fail "G1 resume after kill" "backfill completed before a mid-run kill"; fi
 docker compose kill "$WORKER_SERVICE" >/dev/null
@@ -56,6 +58,7 @@ docker compose up -d "$WORKER_SERVICE" >/dev/null
 if wait_until '.checkpoints.search' "$expected"; then pass "G1 resume after kill" "checkpoint reached $expected"; else fail "G1 resume after kill" "checkpoint did not recover"; fi
 
 if wait_until '.consumedEventCount' "$expected"; then
+  sleep 2
   search_count=$(curl -fsS http://localhost:9200/replicated-records/_count | node -e 'let b="";process.stdin.on("data",d=>b+=d).on("end",()=>console.log(Number(JSON.parse(b).count)))')
   consumed_count=$(json_number "$(status_json)" '.consumedEventCount')
   if [ "$search_count" -eq "$expected" ] && [ "$consumed_count" -eq "$expected" ]; then
@@ -65,10 +68,15 @@ if wait_until '.consumedEventCount' "$expected"; then
   fi
 else fail "G2 no duplicates" "independent consumer did not receive all events"; fi
 
-curl -fsS -X POST "$API_URL/api/simulation/sink/search/down" >/dev/null
+docker compose stop elasticsearch >/dev/null
 curl -fsS -X POST "$API_URL/api/simulation/change" -H 'content-type: application/json' -d '{}' >/dev/null
 sleep 3
 stalled=$(json_number "$(status_json)" '.pending.search')
+docker compose start elasticsearch >/dev/null
+for _ in $(seq 1 "$WAIT_SECONDS"); do
+  if curl -fsS http://localhost:9200/_cluster/health >/dev/null 2>&1; then break; fi
+  sleep 1
+done
 curl -fsS -X POST "$API_URL/api/simulation/sink/search/up" >/dev/null
 if wait_until '.pending.search' 0; then pass "G3 sink outage" "pending=$stalled, recovered"; else fail "G3 sink outage" "sink did not recover"; fi
 
