@@ -62,7 +62,13 @@ Authentication, multi-tenant isolation, production high availability, S3 archiva
 
 ## Where AI deviated from the specification
 
-This section is updated during implementation. Initial agent-generated designs are being checked against `SPEC.md`; any changes to checkpointing, ordering, or test behavior will be recorded here with the reason and corrective action.
+### Deviation 1 — The first crash test did not prove a mid-run kill
+
+The initial AI-generated verifier seeded data and killed the worker immediately, then accepted any eventual completion. That was insufficient because the worker could finish before the kill. The verifier was corrected to pause the pipeline during seed, resume it, wait until the checkpoint is strictly between zero and the final sequence, and only then kill the worker.
+
+### Deviation 2 — Reset logic ignored external sink state
+
+The initial reset truncated PostgreSQL tables but left Elasticsearch documents and RabbitMQ messages untouched. G2 exposed this when Elasticsearch contained more documents than the new source dataset. The reset path now resets the custom PostgreSQL outbox sequence, while the verifier explicitly clears the Elasticsearch index and purges the consumer queue before each deterministic run.
 
 ## Gate status
 

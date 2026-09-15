@@ -40,3 +40,9 @@ make verify
 ## Scope decisions
 
 The first version does not include authentication, multi-tenant isolation, production HA, S3, Redis, ClickHouse, Apache NiFi, or a polished product design. The assignment evaluates fault behavior and evidence, so reliability gates take priority over additional integrations and visual features.
+
+## Revision notes
+
+- **v1:** The first verifier killed the worker immediately after seeding and only checked eventual completion. It did not prove that the kill happened during active backfill.
+- **v2:** Backfill verification now pauses before seed, resumes, waits for a checkpoint strictly inside the workload, kills the worker, and then checks recovery to the final checkpoint.
+- **v2:** Reset behavior was tightened after G2 exposed stale external Elasticsearch documents and a non-reset PostgreSQL sequence. Verification now clears the index and RabbitMQ queue, and the API resets the custom outbox sequence.
