@@ -116,11 +116,17 @@ export class ReplicationService {
     if (sink === 'search') {
       if (event.operation === 'delete') {
         try {
-          await this.elastic.delete({ index: 'replicated-records', id: event.recordId });
+          await this.elastic.delete({ index: 'replicated-records', id: event.recordId, version: Number(event.version), version_type: 'external_gte' });
         } catch (error: any) {
-          if (error?.meta?.statusCode !== 404) throw error;
+          if (error?.meta?.statusCode !== 404 && !this.isVersionConflict(error)) throw error;
         }
-      } else await this.elastic.index({ index: 'replicated-records', id: event.recordId, document: { ...(event.payload ?? {}), source_version: event.version, replicated_sequence: event.sequence, replicated_at: new Date().toISOString() } });
+      } else {
+        try {
+          await this.elastic.index({ index: 'replicated-records', id: event.recordId, version: Number(event.version), version_type: 'external_gte', document: { ...(event.payload ?? {}), source_version: event.version, replicated_sequence: event.sequence, replicated_at: new Date().toISOString() } });
+        } catch (error: any) {
+          if (!this.isVersionConflict(error)) throw error;
+        }
+      }
     } else {
       if (!this.rabbit) throw new Error('RabbitMQ channel unavailable');
       const message = Buffer.from(JSON.stringify(event));
@@ -130,6 +136,10 @@ export class ReplicationService {
   }
 
   private isPermanent(error: any, event: OutboxRow) { return error?.code === 'INVALID_PAYLOAD' || (event.payload && (event.payload as any).valid === false); }
+
+  private isVersionConflict(error: any) {
+    return error?.meta?.statusCode === 409 && error?.meta?.body?.error?.type === 'version_conflict_engine_exception';
+  }
 
   private async writeDlq(sink: SinkName, event: OutboxRow, error: any) {
     await this.db.query(`INSERT INTO dead_letters(sink,sequence,event_id,record_id,payload,error_code,error_message) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(sink,sequence) DO NOTHING`, [sink, event.sequence, event.eventId, event.recordId, event.payload, error.code ?? 'PERMANENT_ERROR', error.message]);

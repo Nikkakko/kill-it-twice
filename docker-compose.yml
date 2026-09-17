@@ -54,6 +54,9 @@ services:
       POSTGRES_PASSWORD: replication
       DATABASE_URL: postgresql://replication:replication@postgres:5432/replication
       ELASTICSEARCH_URL: http://elasticsearch:9200
+      RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672/api/overview
+      RABBITMQ_USER: replication
+      RABBITMQ_PASSWORD: replication
       API_PORT: 3000
     depends_on:
       postgres: { condition: service_healthy }

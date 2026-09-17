@@ -68,7 +68,7 @@ export class ApiController {
           Date.now() - new Date(runtimeRow.last_heartbeat).getTime() < 15000
             ? "healthy"
             : "stale",
-        rabbitmq: "managed-by-worker",
+        rabbitmq: await this.rabbitmqHealth(),
         elasticsearch: await this.elasticsearchHealth(),
       },
     };
@@ -259,9 +259,24 @@ export class ApiController {
         );
         const event = original.rows[0];
         if (!event) continue;
+        const current = await client.query<{
+          version: string;
+          payload: Record<string, unknown> | null;
+          deleted: boolean;
+        }>(
+          `SELECT version::text,
+                  jsonb_build_object('id', id, 'name', name, 'email', email, 'segment', segment, 'valid', valid) payload,
+                  deleted
+           FROM source_records WHERE id=$1`,
+          [failure.record_id],
+        );
+        const source = current.rows[0];
+        const operation = source?.deleted ? "delete" : event.operation;
+        const payload = source?.deleted ? null : source?.payload ?? failure.payload;
+        const version = Number(source?.version ?? event.version);
         await client.query(
           "INSERT INTO outbox_events(event_id,record_id,version,operation,payload,mode,target) VALUES ($1,$2,$3,$4,$5,'incremental',$6)",
-          [randomUUID(), failure.record_id, Number(event.version), event.operation, failure.payload, failure.sink],
+          [randomUUID(), failure.record_id, version, operation, payload, failure.sink],
         );
         await client.query("UPDATE dead_letters SET replayed_at=now() WHERE id=$1", [failure.id]);
         count++;
@@ -298,6 +313,20 @@ export class ApiController {
     try {
       await this.elastic.cluster.health();
       return "healthy";
+    } catch {
+      return "unhealthy";
+    }
+  }
+
+  private async rabbitmqHealth(): Promise<string> {
+    try {
+      const response = await fetch(process.env.RABBITMQ_MANAGEMENT_URL ?? "http://localhost:15672/api/overview", {
+        headers: {
+          authorization: `Basic ${Buffer.from(`${process.env.RABBITMQ_USER ?? "replication"}:${process.env.RABBITMQ_PASSWORD ?? "replication"}`).toString("base64")}`,
+        },
+        signal: AbortSignal.timeout(1500),
+      });
+      return response.ok ? "healthy" : "unhealthy";
     } catch {
       return "unhealthy";
     }

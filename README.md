@@ -58,6 +58,14 @@ Decision: use at-least-once transport plus idempotency. A distributed transactio
 
 Decision: advance successful records and isolate permanent failures. Rolling back an entire batch would violate G4 and unnecessarily delay good records. The tradeoff is more detailed per-item bookkeeping.
 
+### ADR-005: External source versions in Elasticsearch
+
+Decision: send the source revision as Elasticsearch's external version with `external_gte`. A retry of the same revision is harmless, while an older event cannot overwrite a newer document. The tradeoff is that source versions must remain monotonic per record.
+
+### ADR-006: RabbitMQ management health probe
+
+Decision: have the API query RabbitMQ's authenticated management endpoint for status reporting. This gives operators a real dependency signal instead of a worker-owned placeholder; the tradeoff is one extra health request and the need to configure management credentials.
+
 ## What was not built and why
 
 Authentication, multi-tenant isolation, production high availability, S3 archival, Redis caching, ClickHouse analytics, NiFi orchestration, and polished product UX were intentionally deferred. The assignment prioritizes failure behavior, verification, and operational clarity within the time limit.
@@ -78,10 +86,10 @@ The current live Docker run passes all required gates:
 
 | Gate | Result | Evidence |
 | --- | --- | --- |
-| G1 resume after kill | PASS | Worker killed mid-backfill; search checkpoint recovered to 5,000 |
-| G2 no duplicates | PASS | Source 5,000; Elasticsearch 5,000; independent consumer unique count 5,000 |
+| G1 resume after kill | PASS | Worker killed during backfill with incremental writes present; search checkpoint recovered to 5,025 |
+| G2 no duplicates | PASS | Two worker kills; source 6,025; Elasticsearch 6,025; independent consumer unique count 6,025 |
 | G3 sink outage | PASS | Elasticsearch container stopped with pending work, then restarted and drained |
 | G4 partial batch failure | PASS | 497 valid records written; 3 invalid records isolated in the DLQ |
 | G5 observability | PASS | Status exposes health, checkpoints, lag, throughput, and DLQ count |
 
-Run `make verify` to repeat the failure-oriented integration test, or `make capacity` to repeat the 20,000-record measurement. The verifier intentionally reports FAIL rather than hiding an incomplete or unavailable dependency.
+The verifier also reports supplemental PASS checks for repeated restart recovery and corrected-source DLQ replay. Run `make verify` to repeat the failure-oriented integration test, or `make capacity` to repeat the 20,000-record measurement. The verifier intentionally reports FAIL rather than hiding an incomplete or unavailable dependency.

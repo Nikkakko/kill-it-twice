@@ -40,6 +40,26 @@ wait_until_mid_backfill() {
   done
   return 1
 }
+wait_until_positive() {
+  local field="$1"
+  for _ in $(seq 1 "$WAIT_SECONDS"); do
+    local value
+    value=$(json_number "$(status_json)" "$field")
+    if [ "$value" -gt 0 ]; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+wait_until_zero() {
+  local field="$1"
+  for _ in $(seq 1 "$WAIT_SECONDS"); do
+    local value
+    value=$(json_number "$(status_json)" "$field")
+    if [ "$value" -eq 0 ]; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
 
 say "Kill It Twice integration verification"
 if ! wait_for_api; then fail "Prerequisites" "API did not become ready"; exit 1; fi
@@ -49,13 +69,34 @@ curl -sS -o /dev/null -X DELETE http://localhost:9200/replicated-records || true
 docker compose exec -T rabbitmq rabbitmqctl purge_queue replication.consumer >/dev/null 2>&1 || true
 curl -fsS -X POST "$API_URL/api/simulation/seed" -H 'content-type: application/json' -d '{"count":5000,"reset":true}' >/dev/null
 
-expected=$(json_number "$(status_json)" '.sourceCount')
+backfill_expected=$(json_number "$(status_json)" '.sourceCount')
 docker compose up -d "$WORKER_SERVICE" >/dev/null
 curl -fsS -X POST "$API_URL/api/pipeline/resume" >/dev/null
-if ! wait_until_mid_backfill "$expected"; then fail "G1 resume after kill" "backfill completed before a mid-run kill"; fi
+if ! wait_until_mid_backfill "$backfill_expected"; then fail "G1 resume after kill" "backfill completed before a mid-run kill"; fi
+
+incremental_during_backfill=25
+for _ in $(seq 1 "$incremental_during_backfill"); do
+  curl -fsS -X POST "$API_URL/api/simulation/change" -H 'content-type: application/json' -d '{"target":"both"}' >/dev/null
+done
+expected=$(json_number "$(status_json)" '.sourceCount')
 docker compose kill "$WORKER_SERVICE" >/dev/null
 docker compose up -d "$WORKER_SERVICE" >/dev/null
 if wait_until '.checkpoints.search' "$expected"; then pass "G1 resume after kill" "checkpoint reached $expected"; else fail "G1 resume after kill" "checkpoint did not recover"; fi
+
+second_incremental_count=1000
+curl -fsS -X POST "$API_URL/api/pipeline/pause" >/dev/null
+for _ in $(seq 1 "$second_incremental_count"); do
+  curl -fsS -X POST "$API_URL/api/simulation/change" -H 'content-type: application/json' -d '{"target":"both"}' >/dev/null
+done
+expected=$(json_number "$(status_json)" '.sourceCount')
+curl -fsS -X POST "$API_URL/api/pipeline/resume" >/dev/null
+if wait_until_positive '.pending.search'; then
+  docker compose kill "$WORKER_SERVICE" >/dev/null
+  docker compose up -d "$WORKER_SERVICE" >/dev/null
+  if wait_until '.checkpoints.search' "$expected"; then pass "G2 repeated kill/restart" "two worker kills, incremental events=$((incremental_during_backfill + second_incremental_count))"; else fail "G2 repeated kill/restart" "second restart did not recover"; fi
+else
+  fail "G2 repeated kill/restart" "incremental workload completed before second kill";
+fi
 
 if wait_until '.consumedEventCount' "$expected"; then
   sleep 2
@@ -86,7 +127,24 @@ if wait_until '.dlqCount' 3; then
   if [ "$actual_dlq" -eq 3 ]; then pass "G4 partial batch failure" "497 written, 3 in DLQ"; else fail "G4 partial batch failure" "expected 3 DLQ records, got $actual_dlq"; fi
 else fail "G4 partial batch failure" "DLQ did not receive invalid records"; fi
 
-if curl -fsS "$API_URL/api/status" | node -e "let b='';process.stdin.on('data',d=>b+=d).on('end',()=>{const x=JSON.parse(b); if(!x.health||x.incrementalLag===undefined||x.throughputPerSecond===undefined||x.dlqCount===undefined) process.exit(1)})"; then pass "G5 observability" "status API exposes health, throughput, lag, and DLQ"; else fail "G5 observability" "status API incomplete"; fi
+if [ "${actual_dlq:-0}" -eq 3 ]; then
+  dlq_json=$(curl -fsS "$API_URL/api/dlq")
+  dlq_ids=$(node -e 'const rows=JSON.parse(process.argv[1]); console.log(rows.map(row => row.recordId).join("\n"));' "$dlq_json")
+  while IFS= read -r record_id; do
+    if [ -n "$record_id" ]; then
+      curl -fsS -X POST "$API_URL/api/simulation/change" -H 'content-type: application/json' -d "{\"id\":\"$record_id\",\"invalid\":false,\"target\":\"search\"}" >/dev/null
+    fi
+  done <<< "$dlq_ids"
+  replay_response=$(curl -fsS -X POST "$API_URL/api/dlq/replay" -H 'content-type: application/json' -d '{}')
+  replayed=$(json_number "$replay_response" '.replayed')
+  if [ "$replayed" -eq 3 ] && wait_until_zero '.dlqCount'; then
+    pass "DLQ replay" "corrected source records replayed successfully"
+  else
+    fail "DLQ replay" "replayed=$replayed, unreplayed DLQ did not drain"
+  fi
+fi
+
+if curl -fsS "$API_URL/api/status" | node -e "let b='';process.stdin.on('data',d=>b+=d).on('end',()=>{const x=JSON.parse(b); if(!x.health||x.health.rabbitmq!=='healthy'||x.health.elasticsearch!=='healthy'||x.incrementalLag===undefined||x.throughputPerSecond===undefined||x.dlqCount===undefined) process.exit(1)})"; then pass "G5 observability" "status API exposes live health, throughput, lag, and DLQ"; else fail "G5 observability" "status API incomplete or dependency unhealthy"; fi
 
 if [ "$failures" -gt 0 ]; then say "$failures gate(s) failed"; exit 1; fi
 say "All verification gates passed"
