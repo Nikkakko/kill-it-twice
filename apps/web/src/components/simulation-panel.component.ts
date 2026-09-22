@@ -50,10 +50,14 @@ import { ActionKey, SinkName, SinkState } from "../models";
       <span *ngIf="busy === 'partial'" class="spinner"></span>Inject 500 / 3
       invalid
     </button>
+    <button class="wide" (click)="change.emit()" [disabled]="busy !== null">
+      <span *ngIf="busy === 'change'" class="spinner"></span>Generate change
+    </button>
   </div>`,
 })
 export class SimulationPanelComponent {
   @Input() busy: ActionKey | null = null;
   @Output() sink = new EventEmitter<{ name: SinkName; state: SinkState }>();
   @Output() partial = new EventEmitter<void>();
+  @Output() change = new EventEmitter<void>();
 }

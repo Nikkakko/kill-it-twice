@@ -1,7 +1,7 @@
 export type SinkName = "search" | "events";
 export type SinkState = "up" | "down";
 export type PipelineAction = "start" | "pause" | "resume";
-export type ActionKey = "control" | "seed" | "replay" | "partial" | "config" | `sink:${SinkName}:${SinkState}`;
+export type ActionKey = "control" | "seed" | "replay" | "partial" | "change" | "config" | `sink:${SinkName}:${SinkState}`;
 
 export interface PipelineStatus {
   sourceCount: number;

@@ -94,6 +94,7 @@ import {
         [busy]="actionBusy()"
         (sink)="sink($event.name, $event.state)"
         (partial)="partial()"
+        (change)="generateChange()"
       />
     </section>
     <app-dlq-panel
@@ -197,6 +198,14 @@ export class AppComponent implements OnInit {
       this.http.post("/api/simulation/partial", { count: 500 }),
       "Injected 500 events, including 3 invalid",
       () => this.loadDlq(),
+    );
+  }
+  generateChange() {
+    this.runAction(
+      "change",
+      this.http.post("/api/simulation/change", { target: "both" }),
+      "Generated a source change",
+      () => this.loadRecords(),
     );
   }
 

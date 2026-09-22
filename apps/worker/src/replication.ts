@@ -15,6 +15,9 @@ export class ReplicationService {
   private rabbitConnection?: amqp.ChannelModel;
   private loopPromises: Promise<void>[] = [];
   private throughputWindow = { total: 0, started: Date.now() };
+  private readonly sinkFailureStreak: Record<SinkName, number> = { search: 0, events: 0 };
+  private static readonly BASE_BACKOFF_MS = 1000;
+  private static readonly MAX_BACKOFF_MS = 30000;
 
   constructor(private readonly db: Database) {}
 
@@ -74,22 +77,32 @@ export class ReplicationService {
           try {
             await this.processEvent(sink, event);
             await this.advance(sink, event.sequence);
+            this.sinkFailureStreak[sink] = 0;
           } catch (error: any) {
             if (this.isPermanent(error, event)) {
               await this.writeDlq(sink, event, error);
               await this.advance(sink, event.sequence);
+              this.sinkFailureStreak[sink] = 0;
               continue;
             }
-            this.logger.warn(`${sink} paused after transient failure: ${error.message}`);
-            await this.delay(1000);
+            const delay = this.nextBackoff(sink);
+            this.logger.warn(`${sink} paused after transient failure (attempt ${this.sinkFailureStreak[sink]}, retrying in ${delay}ms): ${error.message}`);
+            await this.delay(delay);
             break;
           }
         }
       } catch (error: any) {
-        this.logger.error(`${sink} loop error: ${error.message}`);
-        await this.delay(1500);
+        const delay = this.nextBackoff(sink);
+        this.logger.error(`${sink} loop error (attempt ${this.sinkFailureStreak[sink]}, retrying in ${delay}ms): ${error.message}`);
+        await this.delay(delay);
       }
     }
+  }
+
+  private nextBackoff(sink: SinkName): number {
+    this.sinkFailureStreak[sink]++;
+    const exponent = this.sinkFailureStreak[sink] - 1;
+    return Math.min(ReplicationService.MAX_BACKOFF_MS, ReplicationService.BASE_BACKOFF_MS * 2 ** exponent);
   }
 
   private async nextBatch(sink: SinkName, size: number): Promise<OutboxRow[]> {
