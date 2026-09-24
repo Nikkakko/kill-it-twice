@@ -80,6 +80,18 @@ The initial AI-generated verifier seeded data and killed the worker immediately,
 
 The initial reset truncated PostgreSQL tables but left Elasticsearch documents and RabbitMQ messages untouched. G2 exposed this when Elasticsearch contained more documents than the new source dataset. The reset path now resets the custom PostgreSQL outbox sequence, while the verifier explicitly clears the Elasticsearch index and purges the consumer queue before each deterministic run.
 
+### Deviation 3 — Retry logic was bounded but not actually backed off
+
+The reliability rules in this spec require retries to be bounded and backed off. The AI-generated worker retry on a transient sink failure was a flat 1,000ms sleep on every attempt — bounded and logged, but not growing, so it satisfied the letter of "no busy-loop" without satisfying "backed off." Found in a self-review against the spec's own rules, not by a failing gate. Corrected to a per-sink exponential backoff (1s doubling to a 30s cap, reset on success), verified live in worker logs during a G3 outage (`attempt 1, retrying in 1000ms` → `attempt 2, retrying in 2000ms`).
+
+### Deviation 4 — The independent consumer could retry a malformed message forever
+
+The AI-generated RabbitMQ consumer treated every processing failure identically: `nack(message, false, true)`, unconditional requeue. That is correct for a transient database error, but a JSON parse failure on a malformed message body is deterministic — the same bytes fail identically forever, so requeueing is an unbounded retry loop with no way to succeed. No gate exercises this, since the worker never produces malformed JSON; found by reviewing the consumer against the same "bounded and backed off" rule that caught Deviation 3. Corrected by splitting the two failure classes: a parse failure is now routed once to a dedicated `replication.consumer.dlq` queue and acknowledged off the main queue, while a database-write failure still retries indefinitely with backoff, never acknowledged before success. Verified live by publishing a malformed message directly to the exchange and confirming it landed in the DLQ instead of looping.
+
+### Deviation 5 — Elasticsearch deletes had no protection against stale-write resurrection
+
+A delete was implemented as a hard `elastic.delete` call. That leaves no document behind for the external-version check (ADR-005) to compare against, so a later, out-of-order `upsert` event carrying an older version than the delete would find nothing to conflict with and would recreate the record — silently violating the same "older writes must not overwrite newer state" rule ADR-005 exists to enforce, just for deletes instead of updates. Found in a self-review, not by a gate; the current API has no endpoint that triggers a delete, so this was a latent path, not one any gate or the UI currently exercises. Corrected by writing a version-guarded tombstone document (`deleted: true`) instead of removing the document, and filtering tombstones out of `/api/replicated` search results.
+
 ## Gate status
 
 The current live Docker run passes all required gates:

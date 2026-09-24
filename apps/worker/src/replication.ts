@@ -55,6 +55,7 @@ export class ReplicationService {
             email: { type: 'text' },
             segment: { type: 'keyword' },
             valid: { type: 'boolean' },
+            deleted: { type: 'boolean' },
             source_version: { type: 'long' },
             replicated_sequence: { type: 'long' },
             replicated_at: { type: 'date' },
@@ -128,10 +129,13 @@ export class ReplicationService {
     }
     if (sink === 'search') {
       if (event.operation === 'delete') {
+        // A hard delete leaves no document for a later out-of-order, older-version
+        // upsert to lose a version check against — it would just recreate the row.
+        // Writing a tombstone keeps the version guard in force after deletion too.
         try {
-          await this.elastic.delete({ index: 'replicated-records', id: event.recordId, version: Number(event.version), version_type: 'external_gte' });
+          await this.elastic.index({ index: 'replicated-records', id: event.recordId, version: Number(event.version), version_type: 'external_gte', document: { id: event.recordId, deleted: true, source_version: event.version, replicated_sequence: event.sequence, replicated_at: new Date().toISOString() } });
         } catch (error: any) {
-          if (error?.meta?.statusCode !== 404 && !this.isVersionConflict(error)) throw error;
+          if (!this.isVersionConflict(error)) throw error;
         }
       } else {
         try {

@@ -88,9 +88,14 @@ export class ApiService {
       const result = await this.elastic.search({
         index: "replicated-records",
         size,
-        query: query
-          ? { multi_match: { query, fields: ["name", "email", "segment"] } }
-          : { match_all: {} },
+        query: {
+          bool: {
+            must: query
+              ? [{ multi_match: { query, fields: ["name", "email", "segment"] } }]
+              : [{ match_all: {} }],
+            must_not: [{ term: { deleted: true } }],
+          },
+        },
         sort: [{ replicated_sequence: "desc" }],
       });
       return result.hits.hits.map(hit => {
